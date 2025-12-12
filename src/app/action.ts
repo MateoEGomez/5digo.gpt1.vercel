@@ -2,12 +2,9 @@
 
 "use server";
 
-import * as bcrypt from 'bcryptjs';
-import { supabaseAdmin } from '@/lib/supabase';
+import { createServerSupabaseClient, supabaseAdmin } from '@/lib/supabase';
+import { getAuthUser } from '@/lib/auth';
 import { redirect } from 'next/navigation';
-import { createJWT, setAuthCookie, clearAuthCookie, getUserFromToken } from '@/lib/auth';
-
-const SALT_ROUNDS = 10;
 
 export async function registerUser(formData: FormData) {
   const email = formData.get("email") as string;
@@ -20,42 +17,52 @@ export async function registerUser(formData: FormData) {
 
   try {
     console.log(`[AUTH] Registrando nuevo usuario: ${email}, role: ${role}`);
+    const supabase = await createServerSupabaseClient();
 
-    // 1. Hashear la contraseña
-    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+    // 1. Crear usuario con Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          role: role, // Metadata del usuario
+        },
+      },
+    });
 
-    // 2. Insertar usuario en DB con rol especificado
-    const { data, error } = await supabaseAdmin
-      .from('users')
-      .insert([{ 
-        email, 
-        password_hash: hashedPassword,
-        role: role
-      }])
-      .select('id')
-      .single();
+    if (authError) {
+      console.error(`[AUTH] Error en Supabase Auth:`, authError.message);
+      return { error: authError.message };
+    }
 
-    if (error) throw error;
+    if (!authData.user) {
+      return { error: "Error al crear usuario." };
+    }
 
-    console.log(`[AUTH] Usuario registrado con ID: ${data.id}`);
+    // 2. Actualizar el rol en la tabla profiles
+    // (El trigger ya creó el perfil, solo actualizamos el rol si es profesor)
+    if (role === 'profesor') {
+      const { error: profileError } = await supabaseAdmin
+        .from('profiles')
+        .update({ role: 'profesor' })
+        .eq('id', authData.user.id);
 
-    // 3. Crear JWT automáticamente después del registro
-    const token = await createJWT({ userId: data.id, email, role });
+      if (profileError) {
+        console.error(`[AUTH] Error actualizando perfil:`, profileError.message);
+      }
+    }
 
-    // 4. Guardar JWT en cookie HTTP-Only
-    await setAuthCookie(token);
+    console.log(`[AUTH] Usuario registrado con ID: ${authData.user.id}`);
 
-    console.log(`[AUTH] Registro exitoso y JWT creado para: ${email}`);
-    return { success: true, userId: data.id, role };
+    // Supabase Auth maneja automáticamente la sesión con cookies
+    return { success: true, userId: authData.user.id, role };
 
   } catch (e: any) {
     console.error(`[AUTH] Error en registro:`, e.message);
-    if (e.code === '23505') {
-      return { error: "El email ya está registrado." };
-    }
     return { error: e.message || "Error al registrar usuario." };
   }
 }
+
 export async function loginUser(formData: FormData) {
   const email = formData.get("email") as string;
   const password = formData.get("password") as string;
@@ -66,35 +73,39 @@ export async function loginUser(formData: FormData) {
 
   try {
     console.log(`[AUTH] Intento de login para: ${email}`);
+    const supabase = await createServerSupabaseClient();
 
-    // 1. Buscar usuario en Supabase
-    const { data: userData, error } = await supabaseAdmin
-      .from('users')
-      .select('id, password_hash, role')
-      .eq('email', email)
+    // 1. Login con Supabase Auth
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (authError) {
+      console.log(`[AUTH] Error de autenticación: ${authError.message}`);
+      return { error: "Credenciales inválidas." };
+    }
+
+    if (!authData.user) {
+      return { error: "Error al iniciar sesión." };
+    }
+
+    // 2. Obtener el rol del usuario desde profiles
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', authData.user.id)
       .single();
 
-    if (error || !userData) {
-      console.log(`[AUTH] Usuario no encontrado: ${email}`);
-      return { error: "Credenciales inválidas." };
+    if (profileError || !profile) {
+      console.error(`[AUTH] Error obteniendo perfil:`, profileError);
+      return { error: "Error al obtener datos del usuario." };
     }
-
-    // 2. Comparar la contraseña hasheada
-    const passwordMatch = await bcrypt.compare(password, userData.password_hash);
-
-    if (!passwordMatch) {
-      console.log(`[AUTH] Contraseña incorrecta para: ${email}`);
-      return { error: "Credenciales inválidas." };
-    }
-
-    // 3. Crear JWT (como en registerUser)
-    const token = await createJWT({ userId: userData.id, email, role: userData.role });
-
-    // 4. Guardar JWT en cookie HTTP-Only
-    await setAuthCookie(token);
 
     console.log(`[AUTH] Login exitoso para: ${email}`);
-    return { success: true, userId: userData.id, role: userData.role };
+
+    // Supabase Auth maneja automáticamente la sesión con cookies
+    return { success: true, userId: authData.user.id, role: profile.role };
 
   } catch (e: any) {
     console.error(`[AUTH] Error en login:`, e.message);
@@ -105,7 +116,15 @@ export async function loginUser(formData: FormData) {
 export async function logoutUser() {
   try {
     console.log(`[AUTH] Logout solicitado`);
-    await clearAuthCookie();
+    const supabase = await createServerSupabaseClient();
+
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      console.error(`[AUTH] Error en logout:`, error.message);
+      return { error: error.message };
+    }
+
     return { success: true };
   } catch (e: any) {
     console.error(`[AUTH] Error en logout:`, e.message);
@@ -115,7 +134,7 @@ export async function logoutUser() {
 
 export async function getCurrentUser() {
   try {
-    const user = await getUserFromToken();
+    const user = await getAuthUser();
 
     if (!user) {
       return { user: null };
@@ -123,7 +142,7 @@ export async function getCurrentUser() {
 
     return { user: { id: user.userId, email: user.email, role: user.role } };
   } catch (e: any) {
-    console.error(`[AUTH] Error al verificar token:`, e.message);
+    console.error(`[AUTH] Error al verificar usuario:`, e.message);
     return { user: null };
   }
 }
