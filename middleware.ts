@@ -1,46 +1,46 @@
 // Archivo: middleware.ts
-// Middleware para proteger rutas con Better Auth
 
 import { NextRequest, NextResponse } from 'next/server';
+import { jwtVerify } from 'jose';
+
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.JWT_SECRET || 'your-secret-key-min-32-chars-long!!!'
+);
 
 // Rutas que requieren autenticación
-const protectedRoutes = ['/chat', '/admin', '/student', '/courses'];
-
-// Rutas públicas
-const publicRoutes = ['/login', '/register', '/'];
+const protectedRoutes = ['/chat', '/admin'];
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
-  // Obtener la sesión del usuario desde Better Auth
-  const sessionToken = request.cookies.get('better-auth.session_token')?.value;
-
+  // Verificar si la ruta requiere autenticación
   const isProtectedRoute = protectedRoutes.some(route => pathname.startsWith(route));
-  const isPublicRoute = publicRoutes.some(route => pathname === route || pathname.startsWith(route));
 
-  // Si es una ruta protegida y no hay token, redirigir a login
-  if (isProtectedRoute && !sessionToken) {
-    console.log(`[MIDDLEWARE] Acceso denegado a ${pathname}: sin sesión`);
+  if (!isProtectedRoute) {
+    return NextResponse.next();
+  }
+
+  // Obtener el token de las cookies
+  const token = request.cookies.get('auth_token')?.value;
+
+  if (!token) {
+    console.log(`[MIDDLEWARE] Acceso denegado a ${pathname}: sin token`);
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  // Si el usuario intenta acceder a login/register pero ya está autenticado
-  if ((pathname === '/login' || pathname === '/register') && sessionToken) {
-    return NextResponse.redirect(new URL('/dashboard', request.url));
+  try {
+    // Verificar y decodificar el token
+    const verified = await jwtVerify(token, JWT_SECRET);
+    console.log(`[MIDDLEWARE] Token verificado para usuario: ${(verified.payload as any).userId}`);
+    
+    // Token válido, permitir acceso
+    return NextResponse.next();
+  } catch (error) {
+    console.log(`[MIDDLEWARE] Token inválido o expirado para ${pathname}`);
+    return NextResponse.redirect(new URL('/login', request.url));
   }
-
-  return NextResponse.next();
 }
 
 export const config = {
-  matcher: [
-    // Proteger estas rutas
-    '/chat/:path*',
-    '/admin/:path*',
-    '/student/:path*',
-    '/courses/:path*',
-    // Redirigir si ya está autenticado
-    '/login',
-    '/register',
-  ],
+  matcher: ['/chat/:path*', '/admin/:path*'],
 };
