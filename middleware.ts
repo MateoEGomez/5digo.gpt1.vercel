@@ -1,46 +1,65 @@
 // Archivo: middleware.ts
 
 import { NextRequest, NextResponse } from 'next/server';
-import { jwtVerify } from 'jose';
+import { createClient } from '@supabase/supabase-js';
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || 'your-secret-key-min-32-chars-long!!!'
-);
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 // Rutas que requieren autenticación
-const protectedRoutes = ['/chat', '/admin'];
+const protectedRoutes = ['/chat', '/admin', '/courses'];
+const publicRoutes = ['/login', '/register', '/'];
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   // Verificar si la ruta requiere autenticación
   const isProtectedRoute = protectedRoutes.some(route => pathname.startsWith(route));
+  const isPublicRoute = publicRoutes.some(route => pathname === route);
 
+  // Si es una ruta pública, permitir acceso
   if (!isProtectedRoute) {
     return NextResponse.next();
   }
 
-  // Obtener el token de las cookies
-  const token = request.cookies.get('auth_token')?.value;
+  // Crear cliente de Supabase para el middleware
+  const response = NextResponse.next();
+  const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    cookies: {
+      get(name: string) {
+        return request.cookies.get(name)?.value;
+      },
+      set(name: string, value: string, options: any) {
+        response.cookies.set({
+          name,
+          value,
+          ...options,
+        });
+      },
+      remove(name: string, options: any) {
+        response.cookies.set({
+          name,
+          value: '',
+          ...options,
+        });
+      },
+    },
+  });
 
-  if (!token) {
-    console.log(`[MIDDLEWARE] Acceso denegado a ${pathname}: sin token`);
+  // Verificar sesión de Supabase
+  const { data: { session }, error } = await supabase.auth.getSession();
+
+  if (error || !session) {
+    console.log(`[MIDDLEWARE] Acceso denegado a ${pathname}: sin sesión válida`);
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  try {
-    // Verificar y decodificar el token
-    const verified = await jwtVerify(token, JWT_SECRET);
-    console.log(`[MIDDLEWARE] Token verificado para usuario: ${(verified.payload as any).userId}`);
-    
-    // Token válido, permitir acceso
-    return NextResponse.next();
-  } catch (error) {
-    console.log(`[MIDDLEWARE] Token inválido o expirado para ${pathname}`);
-    return NextResponse.redirect(new URL('/login', request.url));
-  }
+  console.log(`[MIDDLEWARE] Sesión verificada para usuario: ${session.user.id}`);
+
+  // Sesión válida, permitir acceso
+  return response;
 }
 
 export const config = {
-  matcher: ['/chat/:path*', '/admin/:path*'],
+  matcher: ['/chat/:path*', '/admin/:path*', '/courses/:path*'],
 };
